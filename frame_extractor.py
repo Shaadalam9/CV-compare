@@ -1,41 +1,66 @@
-# frame_extractor.py
-
 import os
-import glob
-import re
-import polars as pl
 import cv2
+import glob
+import polars as pl
+from custom_logger import get_logger
+from default.config import CONFIG
 
-# --------- CONFIG ---------
-MAPPING_CSV = "mapping.csv"         # Path to your mapping.csv
-BBOX_DIR = "data/bbox"              # Path to folder with CSVs
-OUTPUT_DIR = "frames"               # Folder where frames will be saved
-MIN_PERSONS = 3
-MIN_CARS = 5
-MIN_LIGHTS = 1
-MAX_FRAMES = 3                      
+# Initialize logger
+logger = get_logger("FrameExtractor")
 
-# Ensure output folder exists
-os.makedirs(OUTPUT_DIR, exist_ok=True)
+# Ensure results directory exists
+RESULTS_DIR = CONFIG["results_dir"]
+os.makedirs(RESULTS_DIR, exist_ok=True)
 
+def load_mapping():
+    """Load mapping CSV using Polars."""
+    mapping_path = CONFIG["mapping_csv"]
+    if not os.path.exists(mapping_path):
+        logger.error(f"Mapping CSV not found at {mapping_path}")
+        return pl.DataFrame()
+    mapping = pl.read_csv(mapping_path)
+    return mapping
 
-# --------- FUNCTIONS ---------
-def find_frames_with_real_index(csv_path, min_persons=3, min_cars=5, min_lights=1):
+def clean_video_list(series):
+    """Convert string list to Python list."""
+    cleaned = []
+    for s in series:
+        if s:
+            cleaned.append([v.strip("[]").strip().strip("'").strip('"') for v in s.split(",")])
+        else:
+            cleaned.append([])
+    return pl.Series(cleaned)
+
+def filter_available_videos(series, csv_dir):
+    """Keep only videos that have corresponding CSVs."""
+    all_csvs = glob.glob(os.path.join(csv_dir, "*.csv"))
+    csv_video_ids = [os.path.basename(f).split("_")[0] for f in all_csvs]
+    filtered = []
+    for vids in series:
+        filtered.append([v for v in vids if v in csv_video_ids])
+    return pl.Series(filtered)
+
+def find_frames_with_real_index(csv_path, min_persons, min_cars, min_lights):
+    """Return frames that satisfy the object count thresholds."""
     filename = os.path.basename(csv_path)
-    m = re.match(r"(.+?)_(\d+)_(\d+)\.csv", filename)
+    m = glob.fnmatch.fnmatch(filename, "*.csv")
     if not m:
         return None, None, pl.DataFrame()
-    video_id, start_time, fps = m.groups()
-    start_time, fps = int(start_time), int(fps)
-    
+
+    # Extract video_id, start_time, fps from CSV name
+    try:
+        parts = filename.replace(".csv", "").split("_")
+        video_id, start_time, fps = parts[0], int(parts[1]), int(parts[2])
+    except Exception:
+        logger.warning(f"Filename {filename} not in expected format")
+        return None, None, pl.DataFrame()
+
     df = pl.read_csv(csv_path)
-    
-    grouped = df.group_by("frame-count").agg([
+    grouped = df.groupby("frame-count").agg([
         (pl.col("yolo-id") == 0).sum().alias("persons"),
         (pl.col("yolo-id") == 2).sum().alias("cars"),
         (pl.col("yolo-id") == 9).sum().alias("traffic_lights")
     ])
-    
     valid_frames = grouped.filter(
         (pl.col("persons") >= min_persons) &
         (pl.col("cars") >= min_cars) &
@@ -43,86 +68,68 @@ def find_frames_with_real_index(csv_path, min_persons=3, min_cars=5, min_lights=
     ).with_columns(
         (pl.col("frame-count") + start_time * fps).alias("real-frame")
     ).sort("frame-count")
-    
+
     return video_id, fps, valid_frames
 
-
-def select_frames_for_city(mapping_df, city_name, bbox_dir, min_persons=3, min_cars=5, min_lights=1, max_frames=3):
-    row = mapping_df.filter(pl.col("city") == city_name)
-    if row.is_empty():
-        print(f"❌ No entry found for city {city_name}")
-        return []
-    
-    video_ids = row[0, "videos_with_csv"]
-    found_frames = []
-    
-    print(f"🏙️ Processing city: {city_name}")
-    
-    for vid in video_ids:
-        pattern = os.path.join(bbox_dir, f"{vid}_*.csv")
-        csv_paths = glob.glob(pattern)
-        
-        for csv_path in csv_paths:
-            video_id, fps, valid_frames = find_frames_with_real_index(csv_path, min_persons, min_cars, min_lights)
-            if valid_frames.is_empty():
-                continue
-            
-            step = fps * 600  # 10 min apart
-            next_target = 0
-            
-            for row_f in valid_frames.iter_rows(named=True):
-                if row_f["real-frame"] >= next_target:
-                    found_frames.append(row_f["real-frame"])
-                    next_target = row_f["real-frame"] + step
-                if len(found_frames) >= max_frames:
-                    break
-            if len(found_frames) >= max_frames:
-                break
-    
-    print(f"✅ Collected {len(found_frames)} frames for {city_name}")
-    return found_frames
-
-
-def save_frames(video_path, frame_numbers, output_dir=OUTPUT_DIR):
-    cap = cv2.VideoCapture(video_path)
-    if not cap.isOpened():
-        print("❌ Could not open video:", video_path)
+def save_frames(video_file, frame_numbers, output_dir=RESULTS_DIR):
+    """Extract and save frames from video."""
+    if not os.path.exists(video_file):
+        logger.error(f"Video file not found: {video_file}")
         return
-    
-    frame_numbers = sorted(frame_numbers)
-    saved_count = 0
-    for i, frame_num in enumerate(frame_numbers):
-        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_num)
+
+    cap = cv2.VideoCapture(video_file)
+    if not cap.isOpened():
+        logger.error(f"Failed to open video: {video_file}")
+        return
+
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    logger.info(f"Video {video_file} opened, total frames: {total_frames}")
+
+    for frame_no in frame_numbers:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_no)
         ret, frame = cap.read()
-        if ret:
-            filename = os.path.join(output_dir, f"{i}_{frame_num}.jpg")
-            cv2.imwrite(filename, frame)
-            saved_count += 1
+        if not ret:
+            logger.warning(f"Frame {frame_no} could not be read")
+            continue
+        out_path = os.path.join(output_dir, f"{os.path.basename(video_file)}_frame_{frame_no}.jpg")
+        cv2.imwrite(out_path, frame)
+        logger.info(f"Saved frame {frame_no} -> {out_path}")
+
     cap.release()
-    print(f"✅ Saved {saved_count} frames to {output_dir}")
 
+def main():
+    """Main function to extract frames from all videos listed in mapping."""
+    mapping = load_mapping()
+    if mapping.is_empty():
+        logger.error("Mapping CSV is empty or missing. Exiting...")
+        return
 
-# --------- MAIN ---------
+    # Clean and filter video lists
+    mapping = mapping.with_columns(clean_video_list(mapping["videos"]).alias("video_list"))
+    mapping = mapping.with_columns(filter_available_videos(mapping["video_list"], CONFIG["bbox_dir"]).alias("videos_with_csv"))
+
+    # Iterate over cities
+    for row in mapping.iter_rows(named=True):
+        city = row["city"]
+        videos = row["videos_with_csv"]
+        logger.info(f"Processing city: {city}")
+
+        for vid in videos:
+            csv_pattern = os.path.join(CONFIG["bbox_dir"], f"{vid}_*.csv")
+            csv_files = glob.glob(csv_pattern)
+            for csv_file in csv_files:
+                video_id, fps, valid_frames = find_frames_with_real_index(
+                    csv_file,
+                    CONFIG["min_persons"],
+                    CONFIG["min_cars"],
+                    CONFIG["min_lights"]
+                )
+                if valid_frames.is_empty():
+                    continue
+
+                frame_nums = valid_frames["real-frame"].to_list()[:CONFIG["max_frames"]]
+                video_path = os.path.join(CONFIG["video_dir"], f"{vid}.mp4")
+                save_frames(video_path, frame_nums)
+
 if __name__ == "__main__":
-    import argparse
-
-    parser = argparse.ArgumentParser(description="Extract frames from video based on YOLO CSVs")
-    parser.add_argument("--city", type=str, required=True, help="Name of the city")
-    parser.add_argument("--video", type=str, required=True, help="Path to the video file")
-    args = parser.parse_args()
-
-    # Load mapping
-    mapping = pl.read_csv(MAPPING_CSV)
-
-    # Make sure 'videos_with_csv' column exists
-    if "videos_with_csv" not in mapping.columns:
-        # Convert the 'videos' string to list
-        mapping = mapping.with_columns(
-            pl.col("videos").apply(lambda s: [v.strip("[]'\" ") for v in s.split(",")] if s else []).alias("videos_with_csv")
-        )
-
-    # Select frames
-    frames = select_frames_for_city(mapping, args.city, BBOX_DIR, MIN_PERSONS, MIN_CARS, MIN_LIGHTS, MAX_FRAMES)
-
-    # Save frames
-    save_frames(args.video, frames)
+    main()
