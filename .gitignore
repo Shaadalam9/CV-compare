@@ -209,3 +209,8 @@ __marimo__/
 # Instance specific files
 config
 secret
+
+results/*.jpg
+results/*.png
+results/*.mp4
+data/
