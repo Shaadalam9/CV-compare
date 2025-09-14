@@ -129,8 +129,8 @@ def main() -> None:
         get_configs("MIN_PERSONS"),
         get_configs("MIN_CARS"),
         get_configs("MIN_LIGHTS"),
-        get_configs("MAX_FRAMES"),
-    )
+        get_configs("MAX_FRAMES")
+        )
 
     frame_numbers = [f[1] for f in frames]
     save_frames(video_path, frame_numbers, save_dir)
