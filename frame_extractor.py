@@ -24,8 +24,12 @@ def find_frames_with_real_index(
         logger.warning("CSV filename {} doesn't match expected pattern", filename)
         return "", 0, pl.DataFrame()
 
-    video_id, start_time, fps = m.groups()
-    start_time, fps = int(start_time), int(fps)
+    video_id: str
+    start_time: int
+    fps: int
+    video_id, start_time_str, fps_str = m.groups()
+    start_time, fps = int(start_time_str), int(fps_str)
+
 
     df = pl.read_csv(csv_path)
     grouped = df.group_by("frame-count").agg([
@@ -34,15 +38,18 @@ def find_frames_with_real_index(
         (pl.col("yolo-id") == 9).sum().alias("traffic_lights"),
     ])
 
-    valid_frames = grouped.filter(
+    offset: int = start_time * fps
+    valid_frames = (grouped.filter(
         (pl.col("persons") >= min_persons)
         & (pl.col("cars") >= min_cars)
         & (pl.col("traffic_lights") >= min_lights)
     ).with_columns(
-        (pl.col("frame-count") + start_time * fps).alias("real-frame")
-    ).sort("frame-count")
-
+        (pl.col("frame-count") + offset).alias("real-frame")
+    )
+    .sort("frame-count")
+)
     return video_id, fps, valid_frames
+
 
 
 def select_frames_for_city(
@@ -138,3 +145,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
