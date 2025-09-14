@@ -1,33 +1,20 @@
-"""Frame extraction utilities for YOLO-annotated videos.
-
-This module reads YOLO CSV outputs, identifies frames that satisfy
-object-count thresholds, and saves them as images.
-
-Linting rules:
-- Line length: ≤119 (flake8 E501)
-- Docstrings follow Google style.
-"""
-
 import os
 import glob
 import re
 from typing import List, Tuple
-
 import cv2
 import polars as pl
-
-from common import get_configs
+import common
 from custom_logger import CustomLogger
+from logmod import logs
 
-# Initialize a custom logger for this module
-logger = CustomLogger(__name__)
+# Initialise a custom logger for this module
+logs(show_level=common.get_configs("logger_level"), show_color=True)
+logger = CustomLogger(__name__)  # use custom logger
 
-def find_frames_with_real_index(
-    csv_path: str,
-    min_persons: int,
-    min_cars: int,
-    min_lights: int,
-) -> Tuple[str, int, pl.DataFrame]:
+
+def find_frames_with_real_index(csv_path: str, min_persons: int, min_cars: int,
+                                min_lights: int,) -> Tuple[str, int, pl.DataFrame]:
     """Identify valid frames from a YOLO CSV based on object counts.
 
     Args:
@@ -84,15 +71,8 @@ def find_frames_with_real_index(
     return video_id, fps, valid_frames
 
 
-def select_frames_for_city(
-    city: str,
-    video_ids: List[str],
-    bbox_dir: str,
-    min_persons: int,
-    min_cars: int,
-    min_lights: int,
-    max_frames: int,
-) -> List[Tuple[str, int]]:
+def select_frames_for_city(city: str, video_ids: List[str], bbox_dir: str, min_persons: int,
+                           min_cars: int, min_lights: int, max_frames: int,) -> List[Tuple[str, int]]:
     """Collect valid frames for all videos belonging to a specific city.
 
     Args:
@@ -182,20 +162,20 @@ def main() -> None:
     and saves them as images.
     """
     # Load configuration values from the config module
-    city = get_configs("CITY_NAME")
-    video_ids = get_configs("VIDEO_IDS")
-    bbox_dir = get_configs("BBOX_DIR")
-    video_path = get_configs("VIDEO_PATH")
-    save_dir = get_configs("SAVE_DIR")
+    city = common.get_configs("CITY_NAME")
+    video_ids = common.get_configs("VIDEO_IDS")
+    bbox_dir = common.get_configs("BBOX_DIR")
+    video_path = common.get_configs("VIDEO_PATH")
+    save_dir = common.get_configs("SAVE_DIR")
 
     frames = select_frames_for_city(
         city=city,
         video_ids=video_ids,
         bbox_dir=bbox_dir,
-        min_persons=get_configs("MIN_PERSONS"),
-        min_cars=get_configs("MIN_CARS"),
-        min_lights=get_configs("MIN_LIGHTS"),
-        max_frames=get_configs("MAX_FRAMES"),
+        min_persons=common.get_configs("MIN_PERSONS"),
+        min_cars=common.get_configs("MIN_CARS"),
+        min_lights=common.get_configs("MIN_LIGHTS"),
+        max_frames=common.get_configs("MAX_FRAMES"),
     )
 
     frame_numbers = [frame[1] for frame in frames]
@@ -204,4 +184,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

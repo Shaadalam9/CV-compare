@@ -3,16 +3,26 @@ revision = 3
 requires-python = "==3.11.9"
 
 [[package]]
+name = "countryinfo"
+version = "0.1.2"
+source = { registry = "https://pypi.org/simple" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/55/16/9fa55d43ae8ee969b75b3977d45f6640bb6c0e52d9912af11593e112a3cc/countryinfo-0.1.2-py3-none-any.whl", hash = "sha256:fd518b3fd8899f6520518320ac17b67bf410c7db5044c61cb191f802bb85c34d", size = 602240, upload-time = "2020-06-01T15:00:09.025Z" },
+]
+
+[[package]]
 name = "cv-compare"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
+    { name = "countryinfo" },
     { name = "opencv-python" },
     { name = "polars" },
 ]
 
 [package.metadata]
 requires-dist = [
+    { name = "countryinfo", specifier = ">=0.1.2" },
     { name = "opencv-python", specifier = ">=4.12.0.88" },
     { name = "polars", specifier = ">=1.33.0" },
 ]
