@@ -22,7 +22,6 @@ from custom_logger import CustomLogger
 # Initialize a custom logger for this module
 logger = CustomLogger(__name__)
 
-
 def find_frames_with_real_index(
     csv_path: str,
     min_persons: int,
@@ -205,3 +204,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
