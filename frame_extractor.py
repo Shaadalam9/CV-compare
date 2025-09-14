@@ -1,12 +1,15 @@
 # frame_extractor.py
 import os
 import glob
-from typing import List, Tuple, Dict
+import re
+from typing import List, Tuple
 import cv2
 import polars as pl
 
-from common import CONFIG
-from custom_logger import logger
+from common import get_configs
+from custom_logger import CustomLogger
+
+logger = CustomLogger(__name__)
 
 
 def find_frames_with_real_index(
@@ -18,7 +21,7 @@ def find_frames_with_real_index(
     filename = os.path.basename(csv_path)
     m = re.match(r"(.+?)_(\d+)_(\d+)\.csv", filename)
     if not m:
-        logger.warning(f"CSV filename {filename} doesn't match expected pattern")
+        logger.warning("CSV filename {} doesn't match expected pattern", filename)
         return "", 0, pl.DataFrame()
 
     video_id, start_time, fps = m.groups()
@@ -28,13 +31,13 @@ def find_frames_with_real_index(
     grouped = df.group_by("frame-count").agg([
         (pl.col("yolo-id") == 0).sum().alias("persons"),
         (pl.col("yolo-id") == 2).sum().alias("cars"),
-        (pl.col("yolo-id") == 9).sum().alias("traffic_lights")
+        (pl.col("yolo-id") == 9).sum().alias("traffic_lights"),
     ])
 
     valid_frames = grouped.filter(
-        (pl.col("persons") >= min_persons) &
-        (pl.col("cars") >= min_cars) &
-        (pl.col("traffic_lights") >= min_lights)
+        (pl.col("persons") >= min_persons)
+        & (pl.col("cars") >= min_cars)
+        & (pl.col("traffic_lights") >= min_lights)
     ).with_columns(
         (pl.col("frame-count") + start_time * fps).alias("real-frame")
     ).sort("frame-count")
@@ -49,13 +52,13 @@ def select_frames_for_city(
     min_persons: int,
     min_cars: int,
     min_lights: int,
-    max_frames: int
+    max_frames: int,
 ) -> List[Tuple[str, int]]:
     """
     Extract valid frames for a single city.
     """
     found_frames: List[Tuple[str, int]] = []
-    logger.info(f"Processing city: {city}")
+    logger.info("Processing city: {}", city)
 
     for vid in video_ids:
         pattern = os.path.join(bbox_dir, f"{vid}_*.csv")
@@ -69,7 +72,7 @@ def select_frames_for_city(
             if valid_frames_df.is_empty():
                 continue
 
-            step = fps * 600  # +10 min in frames
+            step = fps * 600  # every 10 minutes
             next_target = 0
 
             for row in valid_frames_df.iter_rows(named=True):
@@ -81,7 +84,7 @@ def select_frames_for_city(
             if len(found_frames) >= max_frames:
                 break
 
-    logger.info(f"Collected {len(found_frames)} frames for {city}")
+    logger.info("Collected {} frames for {}", len(found_frames), city)
     return found_frames
 
 
@@ -93,7 +96,7 @@ def save_frames(video_path: str, frame_numbers: List[int], save_dir: str) -> Non
     cap = cv2.VideoCapture(video_path)
 
     if not cap.isOpened():
-        logger.error(f"Cannot open video {video_path}")
+        logger.error("Cannot open video {}", video_path)
         return
 
     for frame_num in frame_numbers:
@@ -102,9 +105,9 @@ def save_frames(video_path: str, frame_numbers: List[int], save_dir: str) -> Non
         if ret:
             out_path = os.path.join(save_dir, f"frame_{frame_num}.jpg")
             cv2.imwrite(out_path, frame)
-            logger.info(f"Saved frame {frame_num} to {out_path}")
+            logger.info("Saved frame {} to {}", frame_num, out_path)
         else:
-            logger.warning(f"Could not read frame {frame_num}")
+            logger.warning("Could not read frame {}", frame_num)
 
     cap.release()
 
@@ -113,16 +116,20 @@ def main() -> None:
     """
     Main workflow to extract frames for a given city and video.
     """
-    city = CONFIG["CITY_NAME"]
-    video_ids = CONFIG["VIDEO_IDS"]
-    bbox_dir = CONFIG["BBOX_DIR"]
-    video_path = CONFIG["VIDEO_PATH"]
-    save_dir = CONFIG["SAVE_DIR"]
+    city = get_configs("CITY_NAME")
+    video_ids = get_configs("VIDEO_IDS")
+    bbox_dir = get_configs("BBOX_DIR")
+    video_path = get_configs("VIDEO_PATH")
+    save_dir = get_configs("SAVE_DIR")
 
     frames = select_frames_for_city(
-        city, video_ids, bbox_dir,
-        CONFIG["MIN_PERSONS"], CONFIG["MIN_CARS"],
-        CONFIG["MIN_LIGHTS"], CONFIG["MAX_FRAMES"]
+        city,
+        video_ids,
+        bbox_dir,
+        get_configs("MIN_PERSONS"),
+        get_configs("MIN_CARS"),
+        get_configs("MIN_LIGHTS"),
+        get_configs("MAX_FRAMES"),
     )
 
     frame_numbers = [f[1] for f in frames]
