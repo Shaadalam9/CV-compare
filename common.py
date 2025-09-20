@@ -26,7 +26,7 @@ output_dir = os.path.join(root_dir, '_output')
 
 logger = CustomLogger(__name__)  # use custom logger
 
-
+_config_fallback_logged = False  # module-level variable
 def get_secrets(entry_name: str, secret_file_name: str = 'secret') -> Dict[str, str]:
     """
     Open the secrets file and return the requested entry.
@@ -43,28 +43,20 @@ def get_secrets(entry_name: str, secret_file_name: str = 'secret') -> Dict[str, 
 
 
 def get_configs(entry_name: str, config_file_name: str = 'config', config_default_file_name: str = 'default.config'):
-    """
-    Open the config file and return the requested entry.
-    If no config file is found, open default.config.
-
-    Args:
-        entry_name (str): Description
-        config_file_name (str, optional): Description
-        config_default_file_name (str, optional): Description
-
-    Returns:
-        TYPE: Description
-    """
-    # check if config file is updated
-    if not check_config():
-        sys.exit()
+    global _config_fallback_logged
     try:
+        # Try to open 'config'
         with open(os.path.join(root_dir, config_file_name)) as f:
             content = json.load(f)
     except FileNotFoundError:
+        if not _config_fallback_logged:
+            logger.warning("Config file %s not found. Using default.config instead.", config_file_name)
+            _config_fallback_logged = True
         with open(os.path.join(root_dir, config_default_file_name)) as f:
             content = json.load(f)
     return content[entry_name]
+
+
 
 
 def check_config(config_file_name: str = 'config',
