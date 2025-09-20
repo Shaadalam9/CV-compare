@@ -25,22 +25,12 @@ def find_frames_with_real_index(
 ) -> Tuple[str, int, pl.DataFrame]:
     """
     Read YOLO CSV and return valid frame numbers based on min object counts.
-
-    Args:
-        csv_path: Path to YOLO CSV file.
-        min_persons: Minimum number of persons required.
-        min_cars: Minimum number of cars required.
-        min_lights: Minimum number of traffic lights required.
-
-    Returns:
-        video_id: Video identifier extracted from CSV filename.
-        fps: Frames per second from CSV filename.
-        valid_frames: Polars DataFrame with filtered valid frames.
+    Only process CSVs that match the expected pattern.
     """
     filename = os.path.basename(csv_path)
     match = re.match(r"(.+?)_(\d+)_(\d+)\.csv", filename)
     if not match:
-        logger.warning("CSV filename %s doesn't match expected pattern", filename)
+        # Simply skip this CSV instead of warning
         return "", 0, pl.DataFrame()
 
     video_id, start_time_str, fps_str = match.groups()
@@ -48,7 +38,6 @@ def find_frames_with_real_index(
 
     df = pl.read_csv(csv_path)
 
-    # Group by frame and count objects
     grouped = df.group_by("frame-count").agg(
         [
             (pl.col("yolo-id") == 0).sum().alias("persons"),
@@ -72,60 +61,50 @@ def find_frames_with_real_index(
     return video_id, fps, valid_frames
 
 
+
 def select_frames_for_city(
     city: str,
-    video_ids: List[str],
     bbox_dir: str,
     min_persons: int,
     min_cars: int,
     min_lights: int,
     max_frames: int,
-) -> List[Tuple[str, int]]:
+) -> List[int]:
     """
-    Extract valid frames for a single city from all videos.
-
-    Args:
-        city: Name of the city.
-        video_ids: List of video IDs for the city.
-        bbox_dir: Directory containing YOLO CSV outputs.
-        min_persons: Minimum persons per frame.
-        min_cars: Minimum cars per frame.
-        min_lights: Minimum traffic lights per frame.
-        max_frames: Maximum number of frames to extract.
+    Extract valid frames for a single city from all CSVs.
 
     Returns:
-        List of tuples (video_id, frame_number) for valid frames.
+        List of frame numbers for valid frames (no video_id).
     """
-    found_frames: List[Tuple[str, int]] = []
+    found_frames: List[int] = []
     logger.info("Processing city: %s", city)
 
-    for vid in video_ids:
-        pattern = os.path.join(bbox_dir, f"{vid}_*.csv")
-        csv_paths = glob.glob(pattern)
+    # pick every CSV in bbox_dir
+    csv_paths = glob.glob(os.path.join(bbox_dir, "*.csv"))
 
-        for csv_path in csv_paths:
-            video_id, fps, valid_frames_df = find_frames_with_real_index(
-                csv_path, min_persons, min_cars, min_lights
-            )
+    for csv_path in csv_paths:
+        _, fps, valid_frames_df = find_frames_with_real_index(
+            csv_path, min_persons, min_cars, min_lights
+        )
 
-            if valid_frames_df.is_empty():
-                continue
+        if valid_frames_df.is_empty():
+            continue
 
-            step = fps * 600  # every 10 minutes
-            next_target = 0
+        step = fps * 600  # every 10 minutes
+        next_target = 0
 
-            # Select frames spaced by 'step'
-            for row in valid_frames_df.iter_rows(named=True):
-                if row["real-frame"] >= next_target:
-                    found_frames.append((video_id, row["real-frame"]))
-                    next_target = row["real-frame"] + step
-                if len(found_frames) >= max_frames:
-                    break
+        for row in valid_frames_df.iter_rows(named=True):
+            if row["real-frame"] >= next_target:
+                found_frames.append(row["real-frame"])
+                next_target = row["real-frame"] + step
             if len(found_frames) >= max_frames:
                 break
+        if len(found_frames) >= max_frames:
+            break
 
     logger.info("Collected %d frames for %s", len(found_frames), city)
     return found_frames
+
 
 
 def save_frames(video_path: str, frame_numbers: List[int], save_dir: str) -> None:
@@ -158,18 +137,18 @@ def save_frames(video_path: str, frame_numbers: List[int], save_dir: str) -> Non
 
 
 def main() -> None:
-    """
-    Main workflow to extract frames based on city and video configuration.
-    """
     city = get_configs("CITY_NAME")
-    video_ids = get_configs("VIDEO_IDS")
     bbox_dir = get_configs("BBOX_DIR")
-    video_path = get_configs("VIDEO_PATH")
+    video_dirs = get_configs("video_dirs")
     save_dir = get_configs("SAVE_DIR")
+
+    # Collect all videos from all folders
+    video_paths = []
+    for folder in video_dirs:
+        video_paths.extend(glob.glob(os.path.join(folder, "*.mp4")))
 
     frames = select_frames_for_city(
         city,
-        video_ids,
         bbox_dir,
         get_configs("MIN_PERSONS"),
         get_configs("MIN_CARS"),
@@ -177,9 +156,9 @@ def main() -> None:
         get_configs("MAX_FRAMES"),
     )
 
-    frame_numbers = [f[1] for f in frames]
-    save_frames(video_path, frame_numbers, save_dir)
-
+    # Save frames for each video
+    for video_path in video_paths:
+        save_frames(video_path, frames, save_dir)
 
 if __name__ == "__main__":
     main()
