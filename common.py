@@ -21,7 +21,10 @@ import pycountry
 
 from custom_logger import CustomLogger
 
-root_dir = os.path.dirname(__file__)
+
+
+# Ensure config is always read from the folder where the script is run
+root_dir = os.path.dirname(os.path.abspath(__file__))
 cache_dir = os.path.join(root_dir, "_cache")
 log_dir = os.path.join(root_dir, "_logs")
 output_dir = os.path.join(root_dir, "_output")
@@ -60,17 +63,25 @@ def check_config(
 ):
     """
     Check if config file has at least as many rows as default.config.
+    Falls back to default.config if main config is missing.
     """
     try:
         with open(os.path.join(root_dir, config_file_name)) as f:
             config = json.load(f)
     except FileNotFoundError:
-        logger.error("Config file %s not found.", config_file_name)
-        return False
+        # Fall back to default.config
+        try:
+            with open(os.path.join(root_dir, config_default_file_name)) as f:
+                config = json.load(f)
+            logger.info("Main config not found. Using default.config")
+        except FileNotFoundError:
+            logger.error("Default config file %s not found.", config_default_file_name)
+            return False
     except json.decoder.JSONDecodeError:
         logger.error("Config file badly formatted. Update based on default.config.")
         return False
 
+    # Check default config
     try:
         with open(os.path.join(root_dir, config_default_file_name)) as f:
             default = json.load(f)
