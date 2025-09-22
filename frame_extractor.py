@@ -24,7 +24,8 @@ def find_frames_with_real_index(
     csv_path: str, min_persons: int, min_cars: int, min_lights: int
 ) -> Tuple[str, int, pl.DataFrame]:
     """
-    Reads a YOLO CSV file and returns valid frame numbers based on minimum object counts.
+    Reads a YOLO CSV file and returns valid frame numbers
+    based on minimum object counts.
 
     Args:
         csv_path: Path to the YOLO CSV file.
@@ -35,12 +36,16 @@ def find_frames_with_real_index(
     Returns:
         video_id: ID of the video extracted from the CSV filename.
         fps: Frames per second of the video.
-        valid_frames: Polars DataFrame of frames meeting the object count criteria.
+        valid_frames: Polars DataFrame of frames meeting the
+                      object count criteria.
     """
     filename = os.path.basename(csv_path)
     match = re.match(r"(.+?)_(\d+)_(\d+)\.csv", filename)
     if not match:
-        logger.warning("Skipping CSV with unexpected filename format: %s", filename)
+        logger.warning(
+            "Skipping CSV with unexpected filename format: %s",
+            filename,
+        )
         return "", 0, pl.DataFrame()
 
     video_id, start_time_str, fps_str = match.groups()
@@ -125,7 +130,9 @@ def select_frames(
     return found_frames
 
 
-def save_frames(video_path: str, frame_numbers: List[int], save_dir: str) -> None:
+def save_frames(
+    video_path: str, frame_numbers: List[int], save_dir: str
+) -> None:
     """
     Save selected frames from a video as images.
 
@@ -146,13 +153,21 @@ def save_frames(video_path: str, frame_numbers: List[int], save_dir: str) -> Non
         ret, frame = cap.read()
         if ret:
             out_path = os.path.join(
-                save_dir, f"{os.path.basename(video_path)}_frame_{frame_num}.jpg"
+                save_dir,
+                f"{os.path.basename(video_path)}_"
+                f"frame_{frame_num}.jpg",
             )
             cv2.imwrite(out_path, frame)
-            logger.info("Saved frame %d to %s", frame_num, out_path)
+            logger.info(
+                "Saved frame %d to %s",
+                frame_num,
+                out_path,
+            )
         else:
             logger.warning(
-                "Could not read frame %d from video %s", frame_num, video_path
+                "Could not read frame %d from video %s",
+                frame_num,
+                video_path,
             )
 
     cap.release()
@@ -188,10 +203,15 @@ def main() -> None:
         video_paths.extend(folder_videos)
 
     if not video_paths:
-        logger.warning("No video files found in directories: %s", video_dirs)
+        logger.warning(
+            "No video files found in directories: %s",
+            video_dirs,
+        )
         return
 
-    frames = select_frames(bbox_dir, min_persons, min_cars, min_lights, max_frames)
+    frames = select_frames(
+        bbox_dir, min_persons, min_cars, min_lights, max_frames
+    )
     if not frames:
         logger.warning("No frames selected based on current criteria.")
         return
