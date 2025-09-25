@@ -14,7 +14,7 @@ from typing import List, Tuple
 import cv2
 import polars as pl
 
-from common import get_configs
+from common import get_configs,root_dir
 from custom_logger import CustomLogger
 
 logger = CustomLogger(__name__)
@@ -171,14 +171,72 @@ def save_frames(
             )
 
     cap.release()
+import csv
+
+def get_video_mapping(mapping_csv_path: str) -> dict:
+    """
+    Build a dictionary mapping video_id -> (city, country)
+    """
+    video_mapping = {}
+    try:
+        with open(mapping_csv_path, newline='', encoding='utf-8') as csvfile:
+            reader = csv.DictReader(csvfile)
+            for row in reader:
+                city = row['city']
+                country = row['country']
+
+                videos_str = row['videos']
+                # clean up string and split
+                videos_list = videos_str.strip("[]").replace("'", "").split(",")
+                for vid in videos_list:
+                    vid = vid.strip()
+                    if vid:
+                        video_mapping[vid] = (city, country)
+        logger.info("Video mapping loaded for %d videos", len(video_mapping))
+    except Exception as e:
+        logger.error("Failed to load video mapping CSV: %s", e)
+    return video_mapping
+
+
+def save_frames_with_mapping(
+    video_path: str, frame_numbers: List[int], save_dir: str, video_mapping: dict
+) -> None:
+    """
+    Save frames with filenames: {city}_{country}_{videoid}_{frame_number}.jpg
+    """
+    os.makedirs(save_dir, exist_ok=True)
+    cap = cv2.VideoCapture(video_path)
+
+    if not cap.isOpened():
+        logger.error("Cannot open video: %s", video_path)
+        return
+
+    video_id = os.path.splitext(os.path.basename(video_path))[0]
+    city, country = video_mapping.get(video_id, ("UnknownCity", "UnknownCountry"))
+
+    for frame_num in frame_numbers:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_num)
+        ret, frame = cap.read()
+        if ret:
+            filename = f"{city}_{country}_{video_id}_{frame_num}.jpg"
+            out_path = os.path.join(save_dir, filename)
+            cv2.imwrite(out_path, frame)
+            logger.info("Saved frame %d to %s", frame_num, out_path)
+        else:
+            logger.warning("Could not read frame %d from video %s", frame_num, video_path)
+
+    cap.release()
+
+
 
 
 def main() -> None:
     """
-    Main workflow for frame extraction.
-
-    Reads configuration, collects all videos, selects frames from CSVs,
-    and saves them to the output directory.
+    Full workflow:
+    - Reads config for directories and thresholds
+    - Generates video mapping from internal CSV
+    - Selects frames based on YOLO CSV outputs
+    - Saves frames with {city}_{country}_{videoid}_{frame_number} naming
     """
     try:
         bbox_dir = get_configs("BBOX_DIR")
@@ -189,7 +247,7 @@ def main() -> None:
         min_cars = get_configs("MIN_CARS")
         min_lights = get_configs("MIN_LIGHTS")
         max_frames = get_configs("MAX_FRAMES")
-
+        mapping_csv_path = os.path.join(root_dir, "mapping.csv")  # this CSV is generated internally or exists
     except KeyError as e:
         logger.error("Missing configuration key: %s", e)
         return
@@ -203,23 +261,23 @@ def main() -> None:
         video_paths.extend(folder_videos)
 
     if not video_paths:
-        logger.warning(
-            "No video files found in directories: %s",
-            video_dirs,
-        )
+        logger.warning("No video files found in directories: %s", video_dirs)
         return
 
-    frames = select_frames(
-        bbox_dir, min_persons, min_cars, min_lights, max_frames
-    )
+    # Generate mapping dictionary
+    video_mapping = get_video_mapping(mapping_csv_path)
+
+    # Select frames from YOLO CSVs
+    frames = select_frames(bbox_dir, min_persons, min_cars, min_lights, max_frames)
     if not frames:
         logger.warning("No frames selected based on current criteria.")
         return
 
     frame_numbers = [f[1] for f in frames]
 
+    # Save frames with proper naming
     for video_path in video_paths:
-        save_frames(video_path, frame_numbers, save_dir)
+        save_frames_with_mapping(video_path, frame_numbers, save_dir, video_mapping)
 
 
 if __name__ == "__main__":
