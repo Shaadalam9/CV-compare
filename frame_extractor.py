@@ -14,7 +14,7 @@ from typing import List, Tuple
 import cv2
 import polars as pl
 
-from common import get_configs,root_dir
+from common import get_configs, root_dir
 from custom_logger import CustomLogger
 
 logger = CustomLogger(__name__)
@@ -26,26 +26,11 @@ def find_frames_with_real_index(
     """
     Reads a YOLO CSV file and returns valid frame numbers
     based on minimum object counts.
-
-    Args:
-        csv_path: Path to the YOLO CSV file.
-        min_persons: Minimum number of persons in the frame.
-        min_cars: Minimum number of cars in the frame.
-        min_lights: Minimum number of traffic lights in the frame.
-
-    Returns:
-        video_id: ID of the video extracted from the CSV filename.
-        fps: Frames per second of the video.
-        valid_frames: Polars DataFrame of frames meeting the
-                      object count criteria.
     """
     filename = os.path.basename(csv_path)
     match = re.match(r"(.+?)_(\d+)_(\d+)\.csv", filename)
     if not match:
-        logger.warning(
-            "Skipping CSV with unexpected filename format: %s",
-            filename,
-        )
+        logger.warning("Skipped CSV due to unexpected filename format: {}", filename)
         return "", 0, pl.DataFrame()
 
     video_id, start_time_str, fps_str = match.groups()
@@ -54,7 +39,7 @@ def find_frames_with_real_index(
     try:
         df = pl.read_csv(csv_path)
     except Exception as e:
-        logger.error("Failed to read CSV %s: %s", csv_path, e)
+        logger.error("Unable to read CSV file {}. Error: {}", csv_path, e)
         return video_id, fps, pl.DataFrame()
 
     grouped = df.group_by("frame-count").agg(
@@ -88,23 +73,13 @@ def select_frames(
 ) -> List[Tuple[str, int]]:
     """
     Collect valid frames from all CSVs in a given directory.
-
-    Args:
-        bbox_dir: Directory containing YOLO CSV outputs.
-        min_persons: Minimum number of persons per frame.
-        min_cars: Minimum number of cars per frame.
-        min_lights: Minimum number of traffic lights per frame.
-        max_frames: Maximum number of frames to select.
-
-    Returns:
-        A list of tuples (video_id, frame_number) for selected frames.
     """
     found_frames: List[Tuple[str, int]] = []
-    logger.info("Processing CSV files in %s", bbox_dir)
+    logger.info("Scanning CSV files in directory: {}", bbox_dir)
 
     csv_paths = glob.glob(os.path.join(bbox_dir, "*.csv"))
     if not csv_paths:
-        logger.warning("No CSV files found in directory: %s", bbox_dir)
+        logger.warning("No CSV files were found in: {}", bbox_dir)
         return []
 
     for csv_path in csv_paths:
@@ -112,6 +87,7 @@ def select_frames(
             csv_path, min_persons, min_cars, min_lights
         )
         if valid_frames_df.is_empty():
+            logger.info("No valid frames found in CSV: {}", csv_path)
             continue
 
         step = fps * 600  # spacing: every 10 minutes
@@ -126,7 +102,7 @@ def select_frames(
         if len(found_frames) >= max_frames:
             break
 
-    logger.info("Collected %d frames in total", len(found_frames))
+    logger.info("Total frames selected: {}", len(found_frames))
     return found_frames
 
 
@@ -135,17 +111,12 @@ def save_frames(
 ) -> None:
     """
     Save selected frames from a video as images.
-
-    Args:
-        video_path: Path to the video file.
-        frame_numbers: List of frame indices to save.
-        save_dir: Directory to save output images.
     """
     os.makedirs(save_dir, exist_ok=True)
     cap = cv2.VideoCapture(video_path)
 
     if not cap.isOpened():
-        logger.error("Cannot open video: %s", video_path)
+        logger.error("Failed to open video file: {}", video_path)
         return
 
     for frame_num in frame_numbers:
@@ -158,20 +129,15 @@ def save_frames(
                 f"frame_{frame_num}.jpg",
             )
             cv2.imwrite(out_path, frame)
-            logger.info(
-                "Saved frame %d to %s",
-                frame_num,
-                out_path,
-            )
+            logger.info("Extracted and saved frame {} -> {}", frame_num, out_path)
         else:
-            logger.warning(
-                "Could not read frame %d from video %s",
-                frame_num,
-                video_path,
-            )
+            logger.warning("Failed to read frame {} from video {}", frame_num, video_path)
 
     cap.release()
+
+
 import csv
+
 
 def get_video_mapping(mapping_csv_path: str) -> dict:
     """
@@ -186,15 +152,14 @@ def get_video_mapping(mapping_csv_path: str) -> dict:
                 country = row['country']
 
                 videos_str = row['videos']
-                # clean up string and split
                 videos_list = videos_str.strip("[]").replace("'", "").split(",")
                 for vid in videos_list:
                     vid = vid.strip()
                     if vid:
                         video_mapping[vid] = (city, country)
-        logger.info("Video mapping loaded for %d videos", len(video_mapping))
+        logger.info("Loaded video mapping for {} entries", len(video_mapping))
     except Exception as e:
-        logger.error("Failed to load video mapping CSV: %s", e)
+        logger.error("Could not load video mapping from {}. Error: {}", mapping_csv_path, e)
     return video_mapping
 
 
@@ -208,11 +173,19 @@ def save_frames_with_mapping(
     cap = cv2.VideoCapture(video_path)
 
     if not cap.isOpened():
-        logger.error("Cannot open video: %s", video_path)
+        logger.error("Failed to open video file: {}", video_path)
         return
 
     video_id = os.path.splitext(os.path.basename(video_path))[0]
-    city, country = video_mapping.get(video_id, ("UnknownCity", "UnknownCountry"))
+
+    if video_id not in video_mapping:
+        logger.error(
+            "Video ID '{}' not found in mapping.csv. Frames will be skipped for this video.",
+            video_id,
+        )
+        cap.release()
+        return
+    city, country = video_mapping[video_id]
 
     for frame_num in frame_numbers:
         cap.set(cv2.CAP_PROP_POS_FRAMES, frame_num)
@@ -221,13 +194,11 @@ def save_frames_with_mapping(
             filename = f"{city}_{country}_{video_id}_{frame_num}.jpg"
             out_path = os.path.join(save_dir, filename)
             cv2.imwrite(out_path, frame)
-            logger.info("Saved frame %d to %s", frame_num, out_path)
+            logger.info("Saved frame {} with mapping -> {}", frame_num, out_path)
         else:
-            logger.warning("Could not read frame %d from video %s", frame_num, video_path)
+            logger.warning("Failed to read frame {} from {}", frame_num, video_path)
 
     cap.release()
-
-
 
 
 def main() -> None:
@@ -247,12 +218,12 @@ def main() -> None:
         min_cars = get_configs("MIN_CARS")
         min_lights = get_configs("MIN_LIGHTS")
         max_frames = get_configs("MAX_FRAMES")
-        mapping_csv_path = os.path.join(root_dir, "mapping.csv")  # this CSV is generated internally or exists
+        mapping_csv_path = os.path.join(root_dir, "mapping.csv")
     except KeyError as e:
-        logger.error("Missing configuration key: %s", e)
+        logger.error("Missing required configuration key: {}", e)
         return
     except Exception as e:
-        logger.error("Error reading configuration: %s", e)
+        logger.error("Configuration loading failed. Error: {}", e)
         return
 
     video_paths = []
@@ -261,21 +232,18 @@ def main() -> None:
         video_paths.extend(folder_videos)
 
     if not video_paths:
-        logger.warning("No video files found in directories: %s", video_dirs)
+        logger.warning("No video files found in specified directories: {}", video_dirs)
         return
 
-    # Generate mapping dictionary
     video_mapping = get_video_mapping(mapping_csv_path)
 
-    # Select frames from YOLO CSVs
     frames = select_frames(bbox_dir, min_persons, min_cars, min_lights, max_frames)
     if not frames:
-        logger.warning("No frames selected based on current criteria.")
+        logger.warning("No frames matched the current selection criteria.")
         return
 
     frame_numbers = [f[1] for f in frames]
 
-    # Save frames with proper naming
     for video_path in video_paths:
         save_frames_with_mapping(video_path, frame_numbers, save_dir, video_mapping)
 
