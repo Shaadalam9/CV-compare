@@ -21,11 +21,14 @@ logger = CustomLogger(__name__)
 
 
 def find_frames_with_real_index(
-    csv_path: str, min_persons: int, min_cars: int, min_lights: int
+    csv_path: str, min_persons: int, min_cars: int, min_lights: int,
+    window: int = 10,
 ) -> Tuple[str, int, pl.DataFrame]:
     """
-    Reads a YOLO CSV file and returns valid frame numbers
-    based on minimum object counts.
+    1. Minimum object counts (persons, cars, traffic lights)
+    2. Confidence consistency over a rolling window (default 10 frames)
+
+    Only frames where all criteria are satisfied simultaneously are returned.
     """
     filename = os.path.basename(csv_path)
     match = re.match(r"(.+?)_(\d+)_(\d+)\.csv", filename)
@@ -48,18 +51,28 @@ def find_frames_with_real_index(
             (pl.col("yolo-id") == 2).sum().alias("cars"),
             (pl.col("yolo-id") == 9).sum().alias("traffic_lights"),
         ]
+    ).sort("frame-count")
+    # Step 1: mark frames that satisfy all criteria
+    grouped = grouped.with_columns(
+    (
+        (pl.col("persons") >= min_persons) &
+        (pl.col("cars") >= min_cars) &
+        (pl.col("traffic_lights") >= min_lights)
+    ).alias("criteria_met")
+)
+    
+    
+    # Apply rolling min over the window to ensure criteria are met continuously
+    grouped = grouped.with_columns(
+        pl.col("criteria_met").rolling_min(window_size=window, min_periods=window).alias("stable_window")
     )
 
+    # Keep only frames where the criteria were continuously satisfied
+    valid_frames = grouped.filter(pl.col("stable_window") == True)
+
+    # Add real-frame offset
     offset = start_time * fps
-    valid_frames = (
-        grouped.filter(
-            (pl.col("persons") >= min_persons)
-            & (pl.col("cars") >= min_cars)
-            & (pl.col("traffic_lights") >= min_lights)
-        )
-        .with_columns((pl.col("frame-count") + offset).alias("real-frame"))
-        .sort("frame-count")
-    )
+    valid_frames = valid_frames.with_columns((pl.col("frame-count") + offset).alias("real-frame"))
 
     return video_id, fps, valid_frames
 
@@ -70,6 +83,7 @@ def select_frames(
     min_cars: int,
     min_lights: int,
     max_frames: int,
+    window: int,
 ) -> List[Tuple[str, int]]:
     """
     Collect valid frames from all CSVs in a given directory.
@@ -84,7 +98,7 @@ def select_frames(
 
     for csv_path in csv_paths:
         video_id, fps, valid_frames_df = find_frames_with_real_index(
-            csv_path, min_persons, min_cars, min_lights
+            csv_path, min_persons, min_cars, min_lights,window,
         )
         if valid_frames_df.is_empty():
             logger.info("No valid frames found in CSV: {}", csv_path)
@@ -162,6 +176,17 @@ def get_video_mapping(mapping_csv_path: str) -> dict:
         logger.error("Could not load video mapping from {}. Error: {}", mapping_csv_path, e)
     return video_mapping
 
+def safe_video_capture(video_path: str) -> cv2.VideoCapture:
+    """Try to open video; return None if OpenCV cannot decode it."""
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        logger.error(
+            "Failed to open video file: {}. It may be an unsupported codec (e.g., AV1).",
+            video_path,
+        )
+        return None
+    return cap
+
 
 def save_frames_with_mapping(
     video_path: str, frame_numbers: List[int], save_dir: str, video_mapping: dict
@@ -170,7 +195,7 @@ def save_frames_with_mapping(
     Save frames with filenames: {city}_{country}_{videoid}_{frame_number}.jpg
     """
     os.makedirs(save_dir, exist_ok=True)
-    cap = cv2.VideoCapture(video_path)
+    cap = safe_video_capture(video_path)
 
     if not cap.isOpened():
         logger.error("Failed to open video file: {}", video_path)
@@ -218,6 +243,8 @@ def main() -> None:
         min_cars = get_configs("MIN_CARS")
         min_lights = get_configs("MIN_LIGHTS")
         max_frames = get_configs("MAX_FRAMES")
+        window = get_configs("CONF_WINDOW")      # e.g., 10–15
+
         mapping_csv_path = os.path.join(root_dir, "mapping.csv")
     except KeyError as e:
         logger.error("Missing required configuration key: {}", e)
@@ -226,26 +253,31 @@ def main() -> None:
         logger.error("Configuration loading failed. Error: {}", e)
         return
 
-    video_paths = []
-    for folder in video_dirs:
-        folder_videos = glob.glob(os.path.join(folder, "*.mp4"))
-        video_paths.extend(folder_videos)
-
-    if not video_paths:
-        logger.warning("No video files found in specified directories: {}", video_dirs)
-        return
-
     video_mapping = get_video_mapping(mapping_csv_path)
 
-    frames = select_frames(bbox_dir, min_persons, min_cars, min_lights, max_frames)
+    frames = select_frames(bbox_dir, min_persons, min_cars, min_lights, max_frames,window)
     if not frames:
         logger.warning("No frames matched the current selection criteria.")
         return
 
     frame_numbers = [f[1] for f in frames]
 
-    for video_path in video_paths:
-        save_frames_with_mapping(video_path, frame_numbers, save_dir, video_mapping)
+    # Instead of iterating over video_paths, iterate over mapping.csv entries
+    for video_id, (city, country) in video_mapping.items():
+        # Try to locate the actual video file inside video_dirs
+        found_video = None
+        for folder in video_dirs:
+            candidate = os.path.join(folder, f"{video_id}.mp4")
+            if os.path.exists(candidate):
+                found_video = candidate
+                break
+
+        if not found_video:
+            logger.error("Video file for ID '{}' not found in any directory.", video_id)
+            continue
+
+        save_frames_with_mapping(found_video, frame_numbers, save_dir, video_mapping)
+
 
 
 if __name__ == "__main__":
