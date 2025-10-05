@@ -202,6 +202,7 @@ def save_frames_with_mapping(
         return
 
     video_id = os.path.splitext(os.path.basename(video_path))[0]
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
     if video_id not in video_mapping:
         logger.error(
@@ -213,6 +214,12 @@ def save_frames_with_mapping(
     city, country = video_mapping[video_id]
 
     for frame_num in frame_numbers:
+        if frame_num >= total_frames:
+            logger.warning(
+                "Skipping frame {}: exceeds total frames ({}) in {}",
+                frame_num, total_frames, video_path
+            )
+            continue
         cap.set(cv2.CAP_PROP_POS_FRAMES, frame_num)
         ret, frame = cap.read()
         if ret:
@@ -224,7 +231,6 @@ def save_frames_with_mapping(
             logger.warning("Failed to read frame {} from {}", frame_num, video_path)
 
     cap.release()
-
 
 def main() -> None:
     """
@@ -282,3 +288,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
