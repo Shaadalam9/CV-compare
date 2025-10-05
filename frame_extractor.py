@@ -215,10 +215,6 @@ def save_frames_with_mapping(
 
     for frame_num in frame_numbers:
         if frame_num >= total_frames:
-            logger.warning(
-                "Skipping frame {}: exceeds total frames ({}) in {}",
-                frame_num, total_frames, video_path
-            )
             continue
         cap.set(cv2.CAP_PROP_POS_FRAMES, frame_num)
         ret, frame = cap.read()
@@ -288,4 +284,5 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
