@@ -184,6 +184,23 @@ def safe_video_capture(video_path: str) -> cv2.VideoCapture:
             "Failed to open video file: {}. It may be an unsupported codec (e.g., AV1).",
             video_path,
         )
+        temp_path = os.path.splitext(video_path)[0] + "_reencoded.mp4"
+        cmd = [
+            "ffmpeg", "-y",
+            "-i", video_path,
+            "-vcodec", "libx264", "-acodec", "aac",
+            temp_path
+        ]
+        try:
+            subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+            cap = cv2.VideoCapture(temp_path)
+            if cap.isOpened():
+                logger.info("Fallback succeeded — using reencoded file: {}", temp_path)
+                return cap
+            else:
+                logger.error("Fallback reencode also failed for {}", video_path)
+        except Exception as e:
+            logger.error("FFmpeg reencode failed for {}: {}", video_path, e)
         return None
     return cap
 
@@ -284,5 +301,6 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
 
