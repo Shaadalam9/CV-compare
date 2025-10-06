@@ -16,7 +16,7 @@ import polars as pl
 
 from common import get_configs, root_dir
 from custom_logger import CustomLogger
-
+import subprocess
 logger = CustomLogger(__name__)
 
 
@@ -301,6 +301,7 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
 
 
