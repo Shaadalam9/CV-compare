@@ -28,6 +28,7 @@ MANIFEST
 
 # Directories
 bbox
+frame_dir
 
 # PyInstaller
 #  Usually these files are written by a python script from a template
