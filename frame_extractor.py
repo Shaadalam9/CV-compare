@@ -212,7 +212,7 @@ def select_frames_for_csvs(csv_paths: List[str], min_persons: int, min_cars: int
         return []
 
     collected: List[int] = []       # List to store selected real-frame indices
-    fps_for_spacing: Optional[int] = None  # Used to calculate 10-minute frame spacing
+    frame_interval = common.get_configs("frame_interval")  # Used to calculate 10-minute frame spacing
 
     # Iterate through each YOLO CSV belonging to this video
     for csv_path in csv_paths:
@@ -226,12 +226,8 @@ def select_frames_for_csvs(csv_paths: List[str], min_persons: int, min_cars: int
             logger.info("No valid frames in CSV: {}", csv_path)
             continue
 
-        # Capture FPS from the first usable CSV to determine spacing between frames
-        if fps_for_spacing is None:
-            fps_for_spacing = fps
-
         # Compute step interval (~10 minutes apart); default to 30 FPS if unknown
-        step = (fps_for_spacing or 30) * 600  # 600 seconds * fps = 10-minute interval
+        step = (fps or 30) * int(frame_interval)  # type: ignore # 600 seconds * fps = 10-minute interval
         next_target = collected[-1] + step if collected else 0  # First frame starts at 0
 
         # Iterate through valid frames (already absolute frame numbers)
