@@ -10,7 +10,7 @@ import glob
 import os
 import re
 from typing import List, Tuple
-
+import csv
 import cv2
 import polars as pl
 
@@ -54,14 +54,13 @@ def find_frames_with_real_index(
     ).sort("frame-count")
     # Step 1: mark frames that satisfy all criteria
     grouped = grouped.with_columns(
-    (
-        (pl.col("persons") >= min_persons) &
-        (pl.col("cars") >= min_cars) &
-        (pl.col("traffic_lights") >= min_lights)
-    ).alias("criteria_met")
-)
-    
-    
+        (
+            (pl.col("persons") >= min_persons) &
+            (pl.col("cars") >= min_cars) &
+            (pl.col("traffic_lights") >= min_lights)
+        ).alias("criteria_met")
+    )
+
     # Apply rolling min over the window to ensure criteria are met continuously
     grouped = grouped.with_columns(
         pl.col("criteria_met").rolling_min(window_size=window, min_periods=window).alias("stable_window")
@@ -150,9 +149,6 @@ def save_frames(
     cap.release()
 
 
-import csv
-
-
 def get_video_mapping(mapping_csv_path: str) -> dict:
     """
     Build a dictionary mapping video_id -> (city, country)
@@ -175,6 +171,7 @@ def get_video_mapping(mapping_csv_path: str) -> dict:
     except Exception as e:
         logger.error("Could not load video mapping from {}. Error: {}", mapping_csv_path, e)
     return video_mapping
+
 
 def safe_video_capture(video_path: str) -> cv2.VideoCapture:
     """Try to open video; return None if OpenCV cannot decode it."""
@@ -245,6 +242,7 @@ def save_frames_with_mapping(
 
     cap.release()
 
+
 def main() -> None:
     """
     Full workflow:
@@ -298,10 +296,5 @@ def main() -> None:
         save_frames_with_mapping(found_video, frame_numbers, save_dir, video_mapping)
 
 
-
 if __name__ == "__main__":
     main()
-
-
-
-
