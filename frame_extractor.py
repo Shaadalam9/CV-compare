@@ -323,6 +323,7 @@ def get_video_mapping(mapping_csv_path) -> Dict[str, Tuple[str, str]]:
       - `city`: The city name associated with the videos.
       - `country`: The corresponding country name.
       - `videos`: A string containing one or more video IDs (e.g., "['vidA','vidB']" or "vidA, vidB").
+      - `time_of_day` as list of [0]/[1] matching each video (0 = day, 1 = night)
 
     It uses `parse_videos_list_field()` to handle flexible formats of the `videos` field,
     ensuring that all listed video IDs are extracted and mapped properly.
@@ -335,8 +336,8 @@ def get_video_mapping(mapping_csv_path) -> Dict[str, Tuple[str, str]]:
             A dictionary mapping each `video_id` (str) to a tuple of (`city`, `country`).
             Example:
                 {
-                    "vidA": ("Paris", "France"),
-                    "vidB": ("Berlin", "Germany"),
+                    "vidA": ("Paris", "France",0),
+                    "vidB": ("Berlin", "Germany",1),
                 }
 
             Returns an empty dictionary if the CSV cannot be read or is empty.
@@ -348,7 +349,7 @@ def get_video_mapping(mapping_csv_path) -> Dict[str, Tuple[str, str]]:
         >>> get_video_mapping("mapping.csv")
         {'vid001': ('London', 'UK'), 'vid002': ('Paris', 'France')}
     """
-    video_mapping: Dict[str, Tuple[str, str]] = {}
+    video_mapping: Dict[str, Tuple[str, str, int]] = {}
 
     try:
         # Open the mapping CSV with UTF-8 encoding
@@ -360,14 +361,26 @@ def get_video_mapping(mapping_csv_path) -> Dict[str, Tuple[str, str]]:
                 city = row.get("city", "")
                 country = row.get("country", "")
                 videos_str = row.get("videos", "")
+                tod_str = row.get("time_of_day", "")
 
                 # Parse and normalize the videos field into a list of IDs
                 videos_list = parse_videos_list_field(videos_str)
 
+                # Safely evaluate `time_of_day` field (list of lists like [[0],[1],...])
+                try:
+                    tod_values = eval(tod_str) if tod_str else []
+                except Exception:
+                    tod_values = []
+                
+                # Flatten nested lists like [[0]] → [0]
+                tod_flat = [v[0] if isinstance(v, list) and len(v) else v for v in tod_values]
+
                 # Map each video ID to its (city, country) pair
-                for vid in videos_list:
+                # Match each video to its corresponding time_of_day (fallback 0 = day)
+                for i, vid in enumerate(videos_list):
                     if vid:
-                        video_mapping[vid] = (city, country)
+                        time_flag = tod_flat[i] if i < len(tod_flat) else 0
+                        video_mapping[vid] = (city, country, int(time_flag))
 
         # Log the total number of mappings created
         logger.info("Loaded video mapping for {} entries", len(video_mapping))
@@ -563,12 +576,15 @@ def save_frames_with_mapping(video_path: str, frame_numbers: List[int], save_dir
     This function reads a video file, extracts frames at specific frame indices,
     and saves them as image files in the specified directory. Each frame file
     is named following the convention:
-    `{city}_{country}_{videoid}_{frame_number}.jpg`.
+    `{city}_{country}_{videoid}_{frame_number}.jpg`.and stored under:
+        - save_dir/day/    for time_of_day == 0
+        - save_dir/night/  for time_of_day == 1
 
     The function ensures:
     - Robust video opening via `safe_video_capture()` (handles AV1 or corrupt videos).
     - Frame validity (skips invalid or unreadable frames).
     - Logging for all major operations and errors.
+    - saving outuputs in respective directries
 
     Args:
         video_path (str): Path to the input video file.
@@ -618,8 +634,14 @@ def save_frames_with_mapping(video_path: str, frame_numbers: List[int], save_dir
         cap.release()
         return
 
-    # Retrieve the (city, country) pair for naming output images
-    city, country = video_mapping[video_id]
+    # Retrieve the (city, country,time of day)  for naming output images
+    city, country, time_of_day = video_mapping[video_id]
+    day_or_night = "night" if time_of_day == 1 else "day"
+
+    
+    # Create day/night subfolder
+    output_dir = os.path.join(save_dir, day_or_night)
+    os.makedirs(output_dir, exist_ok=True)
 
     # Iterate through requested frame indices
     for frame_num in frame_numbers:
