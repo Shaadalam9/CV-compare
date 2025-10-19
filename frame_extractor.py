@@ -246,7 +246,7 @@ def find_frames_with_real_index(
             ((pl.col("persons") >= min_persons)
              & (pl.col("cars") >= min_cars)
              & (pl.col("traffic_lights") >= min_lights)
-            ).alias("criteria_met")
+             ).alias("criteria_met")
         )
         # Temporal stability: boolean rolling minimum across `window` frames
         .with_columns(
@@ -341,7 +341,7 @@ def select_frames_for_csvs(
             fps_for_spacing = fps
 
         # Convert desired time spacing (seconds) to frames
-        step = (fps_for_spacing or 30) * common.get_configs("frame_interval")
+        step = (fps_for_spacing or 30) * common.get_configs("frame_interval")  # pyright: ignore[reportOperatorIssue]
         next_target = collected[-1] + step if collected else 0
 
         # Greedy selection: pick the earliest valid frame >= next_target, then advance
@@ -762,12 +762,12 @@ def main() -> None:
     try:
         bbox_dir = common.get_configs("BBOX_DIR")
         video_dirs = common.get_configs("video_dirs")
-        save_dir: str = common.get_configs("SAVE_DIR")
-        min_persons: int = common.get_configs("MIN_PERSONS")
-        min_cars: int = common.get_configs("MIN_CARS")
-        min_lights: int = common.get_configs("MIN_LIGHTS")
-        max_frames: int = common.get_configs("MAX_FRAMES")
-        window: int = common.get_configs("CONF_WINDOW")
+        save_dir: str = common.get_configs("SAVE_DIR")  # type: ignore
+        min_persons: int = common.get_configs("MIN_PERSONS")  # type: ignore
+        min_cars: int = common.get_configs("MIN_CARS")  # type: ignore
+        min_lights: int = common.get_configs("MIN_LIGHTS")  # type: ignore
+        max_frames: int = common.get_configs("MAX_FRAMES")  # type: ignore
+        window: int = common.get_configs("CONF_WINDOW")  # type: ignore
         mapping_csv_path = common.get_configs("mapping")
     except KeyError as e:
         logger.error("Missing required configuration key: {}", e)
@@ -786,7 +786,7 @@ def main() -> None:
 
     # -- Iterate the mapping.csv for actual work
     try:
-        with open(mapping_csv_path, newline="", encoding="utf-8") as csvfile:
+        with open(mapping_csv_path, newline="", encoding="utf-8") as csvfile:  # type: ignore
             reader = csv.DictReader(csvfile)
 
             for row in reader:
@@ -810,7 +810,7 @@ def main() -> None:
                 # Process each video in this row
                 for video_id in videos_list:
                     # Find all CSV segments for this video
-                    csv_paths = glob_csvs_for_video(bbox_dir, video_id)
+                    csv_paths = glob_csvs_for_video(bbox_dir, video_id)  # type: ignore
                     if not csv_paths:
                         logger.warning("No CSVs for video_id='{}'; skipping.", video_id)
                         continue
@@ -825,7 +825,7 @@ def main() -> None:
 
                     # Find the actual .mp4 under any configured video directory
                     found_video: Optional[str] = None
-                    for folder in video_dirs:
+                    for folder in video_dirs:  # type: ignore
                         candidate = os.path.join(folder, f"{video_id}.mp4")
                         if os.path.exists(candidate):
                             found_video = candidate
