@@ -1,4 +1,4 @@
-# by Md Shadab Alam <md_shadab_alam@outlook.com>
+# by Shadab Alam <md_shadab_alam@outlook.com>
 """
 Frame extraction from videos based on YOLO-detected objects (mapping-first, AV1-robust).
 
@@ -72,7 +72,7 @@ import glob
 import os
 import re
 import subprocess
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Union
 
 import cv2
 import polars as pl
@@ -90,11 +90,54 @@ logger = CustomLogger(__name__)
 STOP_AFTER_FIRST_VALID_MAPPING_ROW = False
 
 # -----------------------------------------------------------------------------
-# Constants (YOLO class IDs used)
+# Constants & Types
 # -----------------------------------------------------------------------------
 YOLO_PERSON = 0
 YOLO_CAR = 2
 YOLO_TRAFFIC_LIGHT = 9
+
+# TODInfo: either a single time-of-day (0/1) or a list of (start,end,tod) segments
+TODInfo = Union[int, List[Tuple[int, int, int]]]
+
+
+# -----------------------------------------------------------------------------
+# Small helpers to keep code DRY (and silence jscpd)
+# -----------------------------------------------------------------------------
+def _coerce_required_cols(df: pl.DataFrame) -> pl.DataFrame:
+    """
+    Ensure required columns are available as Int64.
+    We keep this in one place to avoid duplicate code and jscpd complaints.
+    """
+    return df.with_columns(
+        pl.col("frame-count").cast(pl.Int64, strict=False),
+        pl.col("yolo-id").cast(pl.Int64, strict=False),
+    )
+
+
+def _save_frames_loop(
+    cap: cv2.VideoCapture,
+    frame_numbers: List[int],
+    total_frames: int,
+    out_dir: str,
+    city: str,
+    country: str,
+    video_id: str,
+) -> int:
+    """
+    Shared frame-writing loop used by both single-TOD and multi-segment paths.
+    Returns the count of saved frames.
+    """
+    saved = 0
+    for frame_no in frame_numbers:
+        if frame_no >= total_frames:
+            continue
+        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_no)
+        success, frame = cap.read()
+        if success:
+            out_name = f"{city}_{country}_{video_id}_{frame_no}.jpg"
+            cv2.imwrite(os.path.join(out_dir, out_name), frame)
+            saved += 1
+    return saved
 
 
 # -----------------------------------------------------------------------------
@@ -128,7 +171,6 @@ def _read_yolo_csv(csv_path: str) -> Optional[pl.DataFrame]:
     Optional[pl.DataFrame]
         A DataFrame on success; None if both primary and fallback reads fail.
     """
-    # Explicit overrides for known-problem and required columns.
     schema_overrides = {
         "unique-id": pl.Float64,  # avoid int parsing errors when decimals appear
         "frame-count": pl.Int64,  # required column
@@ -141,12 +183,7 @@ def _read_yolo_csv(csv_path: str) -> Optional[pl.DataFrame]:
             infer_schema_length=10000,  # peek deeper before deciding dtypes
             schema_overrides=schema_overrides,
         )
-        # Ensure required columns are ints even if they arrived as strings.
-        df = df.with_columns(
-            pl.col("frame-count").cast(pl.Int64, strict=False),
-            pl.col("yolo-id").cast(pl.Int64, strict=False),
-        )
-        return df
+        return _coerce_required_cols(df)
     except Exception as e:
         logger.error("Unable to read CSV file {}. Error: {}", csv_path, e)
 
@@ -157,11 +194,8 @@ def _read_yolo_csv(csv_path: str) -> Optional[pl.DataFrame]:
             infer_schema_length=10000,
             schema_overrides={"unique-id": pl.Utf8},  # most permissive; keep as text
             ignore_errors=True,  # only offending *fields* in rows are skipped
-        ).with_columns(
-            pl.col("frame-count").cast(pl.Int64, strict=False),
-            pl.col("yolo-id").cast(pl.Int64, strict=False),
         )
-        return df
+        return _coerce_required_cols(df)
     except Exception as e:
         logger.error("Fallback read also failed for {}. Error: {}", csv_path, e)
         return None
@@ -189,29 +223,14 @@ def find_frames_with_real_index(
       5) Convert segment-relative `frame-count` to absolute `real-frame` by offsetting with
          `segment_start_secs * fps`.
 
-    Parameters
-    ----------
-    csv_path : str
-        Path to YOLO detection CSV (single segment of a video).
-    min_persons : int
-        Minimum people to consider a frame.
-    min_cars : int
-        Minimum cars to consider a frame.
-    min_lights : int
-        Minimum traffic lights to consider a frame.
-    window : int, default=10
-        Number of consecutive frames that must satisfy the thresholds to be considered stable.
-
     Returns
     -------
     (video_id, fps, valid_frames_df) : Tuple[str, int, pl.DataFrame]
-        - video_id (str) : extracted from the filename.
-        - fps (int)      : extracted from the filename.
-        - valid_frames_df: columns: ["frame-count","persons","cars","traffic_lights",
-                                     "criteria_met","stable_window","real-frame"]
-          Only rows with stable_window==True are returned.
+      - video_id (str)
+      - fps (int)
+      - valid_frames_df with columns:
+        ["frame-count","persons","cars","traffic_lights","criteria_met","stable_window","real-frame"]
     """
-    # Parse filename tokens.
     filename = os.path.basename(csv_path)
     match = re.match(r"(.+?)_(\d+)_(\d+)\.csv", filename)
     if not match:
@@ -221,18 +240,15 @@ def find_frames_with_real_index(
     video_id, start_time_str, fps_str = match.groups()
     start_time, fps = int(start_time_str), int(fps_str)
 
-    # Read CSV with robust parser
     df = _read_yolo_csv(csv_path)
     if df is None or df.is_empty():
         return video_id, fps, pl.DataFrame()
 
-    # Sanity check: required columns exist
     required_cols = {"frame-count", "yolo-id"}
     if not required_cols.issubset(set(df.columns)):
         logger.error("CSV {} missing required columns {}; skipping.", csv_path, required_cols - set(df.columns))
         return video_id, fps, pl.DataFrame()
 
-    # Aggregate counts per frame-count for classes of interest
     grouped = (
         df.group_by("frame-count")
         .agg([
@@ -241,23 +257,18 @@ def find_frames_with_real_index(
             (pl.col("yolo-id") == YOLO_TRAFFIC_LIGHT).sum().alias("traffic_lights"),
         ])
         .sort("frame-count")
-        # Per-frame threshold check
         .with_columns(
             ((pl.col("persons") >= min_persons)
              & (pl.col("cars") >= min_cars)
              & (pl.col("traffic_lights") >= min_lights)
              ).alias("criteria_met")
         )
-        # Temporal stability: boolean rolling minimum across `window` frames
         .with_columns(
             pl.col("criteria_met").rolling_min(window_size=window, min_samples=window).alias("stable_window")
         )
     )
 
-    # Only keep frames within stable spans
     valid_frames = grouped.filter(pl.col("stable_window").eq(True))
-
-    # Convert segment-local frame number to real (absolute within full video)
     offset = start_time * fps
     valid_frames = valid_frames.with_columns((pl.col("frame-count") + offset).alias("real-frame"))
 
@@ -267,19 +278,6 @@ def find_frames_with_real_index(
 def glob_csvs_for_video(bbox_dir: str, video_id: str) -> List[str]:
     """
     Find all YOLO CSV segments for a given video in a directory.
-
-    Parameters
-    ----------
-    bbox_dir : str
-        Directory containing YOLO CSV files.
-    video_id : str
-        Target video ID.
-
-    Returns
-    -------
-    List[str]
-        Sorted list of CSV filepaths matching the pattern `{video_id}_*_*.csv`.
-        Empty if none found.
     """
     pattern = os.path.join(bbox_dir, f"{video_id}_*_*.csv")
     paths = sorted(glob.glob(pattern))
@@ -299,37 +297,16 @@ def select_frames_for_csvs(
     """
     Aggregate and select valid, *evenly spaced* absolute frame numbers across all segments of a video.
 
-    How spacing works
-    -----------------
-    We compute a spacing step (in frames) using:
-        step = fps_for_spacing * common.get_configs("frame_interval")
-    where `fps_for_spacing` is taken from the first segment with detections,
-    and `frame_interval` is a config (in *seconds*). This ensures roughly one
-    frame sampled per given time interval, but only from periods that satisfy
-    the thresholds + stability criteria.
-
-    Parameters
-    ----------
-    csv_paths : List[str]
-        Segment CSV filepaths for the same video.
-    min_persons, min_cars, min_lights : int
-        Detection thresholds per frame.
-    max_frames : int
-        Hard cap on the number of frames to return across all segments.
-    window : int
-        Temporal stability window (consecutive frames).
-
-    Returns
+    Spacing
     -------
-    List[int]
-        Sorted list of *absolute* frame indices (`real-frame`) to extract.
-        Empty if none qualified.
+    step_frames = fps_for_spacing * common.get_configs("frame_interval")
+    (first non-empty segment determines fps_for_spacing)
     """
     if not csv_paths:
         return []
 
     collected: List[int] = []
-    fps_for_spacing: Optional[int] = None  # determined once from the first valid segment
+    fps_for_spacing: Optional[int] = None
 
     for csv_path in csv_paths:
         _, fps, valid_frames_df = find_frames_with_real_index(csv_path, min_persons, min_cars, min_lights, window)
@@ -340,11 +317,9 @@ def select_frames_for_csvs(
         if fps_for_spacing is None:
             fps_for_spacing = fps
 
-        # Convert desired time spacing (seconds) to frames
-        step = (fps_for_spacing or 30) * common.get_configs("frame_interval")  # pyright: ignore[reportOperatorIssue]
+        step = (fps_for_spacing or 30) * common.get_configs("frame_interval")  # type: ignore
         next_target = collected[-1] + step if collected else 0
 
-        # Greedy selection: pick the earliest valid frame >= next_target, then advance
         for row in valid_frames_df.iter_rows(named=True):
             rf = row["real-frame"]
             if not collected or rf >= next_target:
@@ -366,24 +341,11 @@ def select_frames_for_csvs(
 def parse_videos_list_field(videos_str: str) -> List[str]:
     """
     Parse and normalize the 'videos' field from mapping.csv into a clean list of IDs.
-
-    Accepts two common formats:
-      - Python-list-like string: "['vidA','vidB']"
-      - Comma-separated: "vidA, vidB"
-
-    Parameters
-    ----------
-    videos_str : str
-
-    Returns
-    -------
-    List[str]
-        List of video IDs, stripped of quotes and whitespace.
+    Accepts python-list-like strings and comma-separated strings.
     """
     if not videos_str:
         return []
 
-    # Try literal_eval first for true list syntax
     try:
         data = ast.literal_eval(videos_str)
         if isinstance(data, (list, tuple)):
@@ -391,30 +353,13 @@ def parse_videos_list_field(videos_str: str) -> List[str]:
     except Exception:
         pass
 
-    # Fallback: split comma-separated tokens, clean quotes
     parts = [p.strip().strip("'").strip('"') for p in videos_str.strip("[]").split(",")]
     return [p for p in parts if p]
 
 
 def build_time_interval_mapping(row: dict) -> Dict[str, List[Tuple[int, int, int]]]:
     """
-    Build a mapping of video_id -> list of (start_frame, end_frame, time_of_day) for multi-segment videos.
-
-    This is used when a row indicates the presence of both day(0) and night(1) intervals for a video.
-    The three fields `time_of_day`, `start_time`, `end_time` are expected to be *nested lists*, each
-    aligned per video (e.g., outer dimension is per-video, inner lists are per-interval).
-
-    Example (conceptual)
-    --------------------
-    row["videos"]      : "['vidA']"
-    row["time_of_day"] : "[[0, 1]]"
-    row["start_time"]  : "[[  0, 3000]]"
-    row["end_time"]    : "[[2999, 6000]]"
-
-    Returns
-    -------
-    Dict[str, List[Tuple[int, int, int]]]
-        { video_id: [(start_frame, end_frame, tod), ...], ... }
+    Build: video_id -> [(start_frame, end_frame, tod), ...] for multi-segment videos.
     """
     mapping: Dict[str, List[Tuple[int, int, int]]] = {}
     try:
@@ -429,7 +374,6 @@ def build_time_interval_mapping(row: dict) -> Dict[str, List[Tuple[int, int, int
                 start_list = start_field[i]
                 end_list = end_field[i]
 
-                # Normalize to lists if scalar
                 if not isinstance(tod_list, list):
                     tod_list = [tod_list]
                 if not isinstance(start_list, list):
@@ -444,43 +388,26 @@ def build_time_interval_mapping(row: dict) -> Dict[str, List[Tuple[int, int, int
                         e = int(end_list[j])
                         intervals.append((s, e, int(tod)))
                     except Exception:
-                        # Skip misaligned sub-entries gracefully
                         continue
 
                 if intervals:
                     mapping[vid] = intervals
             except Exception:
-                # Skip malformed per-video entries gracefully
                 continue
     except Exception as e:
         logger.warning("Failed to build interval mapping: {}", e)
     return mapping
 
 
-def get_video_mapping(mapping_csv_path) -> Dict[str, Tuple[str, str, object]]:
+def get_video_mapping(mapping_csv_path: str) -> Dict[str, Tuple[str, str, TODInfo]]:
     """
     Load and parse mapping.csv into: {video_id: (city, country, tod_info)}
 
-    `tod_info` can be:
-      - int: 0 (day) or 1 (night), if the video is single-period.
-      - list[tuple]: [(start, end, tod), ...] for multi-segment day/night splits.
-
-    Logic
-    -----
-    - Detect if a row contains both 0 and 1 in its nested `time_of_day`.
-      If yes, build explicit intervals via `build_time_interval_mapping`.
-    - Otherwise, assign a single tod (0 or 1) per video (defaults to day=0).
-
-    Parameters
-    ----------
-    mapping_csv_path : str
-
-    Returns
-    -------
-    Dict[str, Tuple[str, str, object]]
-        video_id -> (city, country, tod_info)
+    tod_info:
+      - int: 0 (day) or 1 (night)
+      - list[(start,end,tod)]: explicit segments for mixed day/night videos
     """
-    video_mapping: Dict[str, Tuple[str, str, object]] = {}
+    video_mapping: Dict[str, Tuple[str, str, TODInfo]] = {}
 
     try:
         with open(mapping_csv_path, newline="", encoding="utf-8") as csvfile:
@@ -492,16 +419,16 @@ def get_video_mapping(mapping_csv_path) -> Dict[str, Tuple[str, str, object]]:
                 videos_str = row.get("videos", "")
                 videos_list = parse_videos_list_field(videos_str)
 
+                # time_of_day may be an int OR a list of ints; keep typing explicit
                 time_field = row.get("time_of_day", "")
-                time_of_day = 0
+                time_of_day: Union[int, List[int]] = 0
                 nested: List[List[int]] = []
 
-                # Parse nested time_of_day like [[0], [1]] or [[0,1]] etc.
                 try:
                     nested = ast.literal_eval(time_field)
                     flattened = [item for sublist in nested for item in sublist if isinstance(item, int)]
                     if 0 in flattened and 1 in flattened:
-                        time_of_day = [0, 1]  # indicates mixed periods exist in this row
+                        time_of_day = [0, 1]  # mark mixed periods present
                     elif 1 in flattened:
                         time_of_day = 1
                     else:
@@ -510,19 +437,18 @@ def get_video_mapping(mapping_csv_path) -> Dict[str, Tuple[str, str, object]]:
                     time_of_day = 0
                     nested = []
 
-                # If a row declares both day and night, we treat it as multi-segment
+                # Mixed periods? Build explicit intervals.
                 if isinstance(time_of_day, list) and 0 in time_of_day and 1 in time_of_day:
                     interval_mapping = build_time_interval_mapping(row)
                     for vid, intervals in interval_mapping.items():
                         video_mapping[vid] = (city, country, intervals)
                     continue
 
-                # Otherwise, assign single tod per video based on whether any '1' is present
+                # Single TOD per video based on presence of '1' in per-video nested list
                 for i, vid in enumerate(videos_list):
-                    tod = 0
+                    tod: int = 0
                     try:
                         if i < len(nested):
-                            # If any '1' exists in the ith sublist, treat entire video as night=1
                             if 1 in [int(x) for x in nested[i] if isinstance(x, int)]:
                                 tod = 1
                     except Exception:
@@ -542,11 +468,6 @@ def get_video_mapping(mapping_csv_path) -> Dict[str, Tuple[str, str, object]]:
 def _ffprobe_codec(video_path: str) -> Optional[str]:
     """
     Retrieve the codec name (e.g. 'h264', 'av1') for the first video stream via ffprobe.
-
-    Returns
-    -------
-    Optional[str]
-        Codec name lowercase, or None if probing fails.
     """
     cmd = [
         "ffprobe", "-v", "error",
@@ -566,16 +487,6 @@ def _ffprobe_codec(video_path: str) -> Optional[str]:
 def _reencode_to_h264_sw(video_path: str) -> Optional[str]:
     """
     Re-encode video to H.264 using *software* decoding to ensure OpenCV compatibility.
-
-    Why?
-    ----
-    Many OpenCV builds cannot decode AV1, and some hardware-encoded streams are flaky.
-    We force software decode and output a yuv420p H.264 file for maximum compatibility.
-
-    Returns
-    -------
-    Optional[str]
-        Re-encoded path if successful; None otherwise.
     """
     base, _ = os.path.splitext(video_path)
     out_path = base + "_reencoded.mp4"
@@ -584,7 +495,7 @@ def _reencode_to_h264_sw(video_path: str) -> Optional[str]:
 
     cmd = [
         "ffmpeg", "-y",
-        "-hwaccel", "none",   # ensure software path
+        "-hwaccel", "none",
         "-i", video_path,
         "-map", "0:v:0",
         "-c:v", "libx264",
@@ -608,12 +519,6 @@ def _reencode_to_h264_sw(video_path: str) -> Optional[str]:
 def safe_video_capture(video_path: str) -> Optional[cv2.VideoCapture]:
     """
     Open a video robustly, re-encoding to H.264 if needed.
-
-    Steps
-    -----
-    1) ffprobe the codec; if AV1 -> re-encode first.
-    2) Try to open original; if fails -> re-encode and open the copy.
-    3) Return an opened cv2.VideoCapture or None on failure.
     """
     codec = _ffprobe_codec(video_path)
     if codec and codec.lower() in {"av1"}:
@@ -646,28 +551,13 @@ def save_frames_with_mapping(
     video_path: str,
     frame_numbers: List[int],
     save_dir: str,
-    video_mapping: Dict[str, Tuple[str, str, object]]
+    video_mapping: Dict[str, Tuple[str, str, TODInfo]]
 ) -> None:
     """
     Extract and save given absolute frame numbers to day/night subfolders with city/country names.
 
-    Behavior
-    --------
-    - Determines the `video_id` from the filename (without extension).
-    - Looks up (city, country, tod_info) from the pre-built mapping.
     - If `tod_info` is an int: save all frames under {save_dir}/{day|night}/
     - If `tod_info` is a list of (start,end,tod): route frames into appropriate segments.
-
-    Parameters
-    ----------
-    video_path : str
-        Full path to the source video file (`{video_id}.mp4`).
-    frame_numbers : List[int]
-        Absolute frame indices to extract.
-    save_dir : str
-        Root output folder.
-    video_mapping : Dict[str, Tuple[str, str, object]]
-        video_id -> (city, country, tod_info)
     """
     os.makedirs(save_dir, exist_ok=True)
     cap = safe_video_capture(video_path)
@@ -687,51 +577,29 @@ def save_frames_with_mapping(
         return
 
     city, country, tod_info = video_mapping[video_id]
-    multi_segment = isinstance(tod_info, list)
 
-    if not multi_segment:
-        # Single TOD per video (0=day, 1=night)
-        time_label = "night" if tod_info == 1 else "day"
-        subdir = os.path.join(save_dir, time_label)
-        os.makedirs(subdir, exist_ok=True)
+    if isinstance(tod_info, list):
+        # Multi-segment day/night: route frames by intervals
+        for start, end, tod in tod_info:
+            label = "night" if tod == 1 else "day"
+            subdir = os.path.join(save_dir, label)
+            os.makedirs(subdir, exist_ok=True)
 
-        saved = 0
-        for frame_no in frame_numbers:
-            if frame_no >= total_frames:
-                continue
-            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_no)
-            success, frame = cap.read()
-            if success:
-                out_name = f"{city}_{country}_{video_id}_{frame_no}.jpg"
-                cv2.imwrite(os.path.join(subdir, out_name), frame)
-                saved += 1
+            segment_frames = [f for f in frame_numbers if start <= f <= end]
+            saved = _save_frames_loop(cap, segment_frames, total_frames, subdir, city, country, video_id)
+            logger.info("Saved {} frames for {} ({}) segment", saved, video_id, label)
+
         cap.release()
-        logger.info("Saved {} frames for {} ({})", saved, video_id, time_label)
         return
 
-    # Multi-segment day/night (route frames by interval)
-    for start, end, tod in tod_info:
-        label = "night" if tod == 1 else "day"
-        subdir = os.path.join(save_dir, label)
-        os.makedirs(subdir, exist_ok=True)
+    # Single TOD for the entire video
+    time_label = "night" if tod_info == 1 else "day"
+    subdir = os.path.join(save_dir, time_label)
+    os.makedirs(subdir, exist_ok=True)
 
-        # Keep only frames within this segment’s interval
-        segment_frames = [f for f in frame_numbers if start <= f <= end]
-
-        saved = 0
-        for frame_no in segment_frames:
-            if frame_no >= total_frames:
-                continue
-            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_no)
-            success, frame = cap.read()
-            if success:
-                out_name = f"{city}_{country}_{video_id}_{frame_no}.jpg"
-                cv2.imwrite(os.path.join(subdir, out_name), frame)
-                saved += 1
-
-        logger.info("Saved {} frames for {} ({}) segment", saved, video_id, label)
-
+    saved = _save_frames_loop(cap, frame_numbers, total_frames, subdir, city, country, video_id)
     cap.release()
+    logger.info("Saved {} frames for {} ({})", saved, video_id, time_label)
 
 
 # -----------------------------------------------------------------------------
@@ -745,20 +613,9 @@ def main() -> None:
     -----
     1) Read configs (paths, thresholds, limits).
     2) Build `video_mapping` from mapping.csv (city, country, tod info per video).
-    3) Iterate mapping.csv rows with non-empty `country`:
-       a) For each video listed in the row:
-          - Find segment CSVs (YOLO detections).
-          - Compute valid absolute frame numbers (threshold + stability).
-          - Locate the real video file in one of the configured `video_dirs`.
-          - Extract and save frames under {SAVE_DIR}/{day|night}/ with descriptive names.
+    3) Iterate mapping.csv rows with non-empty `country` and process listed videos.
     4) Optionally stop after first valid row if `STOP_AFTER_FIRST_VALID_MAPPING_ROW` is True.
-
-    Notes
-    -----
-    - All errors are logged and the pipeline continues on a best-effort basis.
-    - Ensure the `{video_id}` in CSV filenames matches `{video_id}.mp4` names.
     """
-    # -- Read configuration keys safely
     try:
         bbox_dir = common.get_configs("BBOX_DIR")
         video_dirs = common.get_configs("video_dirs")
@@ -776,15 +633,13 @@ def main() -> None:
         logger.error("Configuration loading failed. Error: {}", e)
         return
 
-    # -- Build video mapping (city, country, TOD segmentation)
-    video_mapping = get_video_mapping(mapping_csv_path)
+    video_mapping = get_video_mapping(mapping_csv_path)  # type: ignore
     if not video_mapping:
         logger.error("Empty or unreadable mapping.csv; nothing to do.")
         return
 
     processed_any_row = False
 
-    # -- Iterate the mapping.csv for actual work
     try:
         with open(mapping_csv_path, newline="", encoding="utf-8") as csvfile:  # type: ignore
             reader = csv.DictReader(csvfile)
@@ -794,7 +649,6 @@ def main() -> None:
                 country = row.get("country", "")
                 videos_str = row.get("videos", "")
 
-                # Skip rows that do not identify a country (as per spec)
                 if not country:
                     logger.warning("Row for city='{}' has empty country; skipping.", city)
                     continue
@@ -807,15 +661,12 @@ def main() -> None:
                     len(videos_list),
                 )
 
-                # Process each video in this row
                 for video_id in videos_list:
-                    # Find all CSV segments for this video
                     csv_paths = glob_csvs_for_video(bbox_dir, video_id)  # type: ignore
                     if not csv_paths:
                         logger.warning("No CSVs for video_id='{}'; skipping.", video_id)
                         continue
 
-                    # Compute frame numbers that meet thresholds + stability, spaced by frame_interval
                     frame_numbers = select_frames_for_csvs(
                         csv_paths, min_persons, min_cars, min_lights, max_frames, window
                     )
@@ -823,7 +674,6 @@ def main() -> None:
                         logger.info("No frames matched thresholds for video_id='{}'.", video_id)
                         continue
 
-                    # Find the actual .mp4 under any configured video directory
                     found_video: Optional[str] = None
                     for folder in video_dirs:  # type: ignore
                         candidate = os.path.join(folder, f"{video_id}.mp4")
@@ -835,7 +685,6 @@ def main() -> None:
                         logger.error("Video file for ID '{}' not found in any directory.", video_id)
                         continue
 
-                    # Extract frames and save with mapping
                     save_frames_with_mapping(found_video, frame_numbers, save_dir, video_mapping)
 
                 processed_any_row = True
